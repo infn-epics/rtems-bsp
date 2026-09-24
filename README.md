@@ -10,7 +10,7 @@ The developer target serves as an archive for the source code. The runtime targe
 Supported BSPs
 --------------
 
-The repo is designed to allow for multiple target architectures. At present the list of BSPs is only 1 long:
+The repo is designed to allow for multiple target architectures. Supported BSPs:
 
 - mvme5500
   - rtems version: 6.1 RELEASE
@@ -18,6 +18,15 @@ The repo is designed to allow for multiple target architectures. At present the 
   - legacy network stack
   - processor is m4700 with hardware floating point support
   - patch to gcc source to only compile for the single powerpc variant
+
+- pc686 (Dockerfile.pc686)
+  - rtems version: 6.1 RELEASE
+  - target: x86 VME single board computers, e.g. VMIC/Abaco VMIVME-7750
+    (Pentium III, Tundra Universe II, Intel 82559 NIC via the fxp driver)
+  - legacy network stack, POSIX API, COM1 console by default
+  - multiboot image: boots via iPXE/GRUB on hardware, or `qemu-system-i386 -kernel`
+  - smoke test: `tests/qemu-hello.sh <developer image>`
+  - NOTE: VME (Universe II) support is not yet part of the RTEMS pc686 BSP
 
 
 Acknowledgements

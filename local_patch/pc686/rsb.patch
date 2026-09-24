@@ -1,0 +1,14 @@
+diff --git a/rsb/rtems/config/tools/rtems-default-tools.bset b/rsb/rtems/config/tools/rtems-default-tools.bset
+index 68d4bc2..87f5124 100644
+--- a/rsb/rtems/config/tools/rtems-default-tools.bset
++++ b/rsb/rtems/config/tools/rtems-default-tools.bset
+@@ -33,7 +33,8 @@ devel/gmp-internal
+ devel/mpfr-internal
+ %{with_rtems_gsed}
+ %{with_rtems_texinfo}
+-%{with_rtems_gdb}
++# don't build gdb as it is fussy about python and not usable on our boards
++#%{with_rtems_gdb}
+ %{with_rtems_binutils}
+ %{with_rtems_gcc}
+ %{with_rtems_tools}

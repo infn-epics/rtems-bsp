@@ -16,12 +16,15 @@ jobs:
       matrix:
         target: [developer, runtime]
         # add more targets here and add a Dockerfile.${{ matrix.target }} to the repo
-        target_architecture: [beatnik]
+        target_architecture: [beatnik, pc686]
 
     runs-on: ubuntu-latest
     env:
       TAG: ghcr.io/${{ github.repository_owner }}/rtems-${{ matrix.target_architecture }}-${{ matrix.target }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Log in to GitHub Docker Registry
         uses: docker/login-action@v3
         with:
@@ -38,12 +41,15 @@ jobs:
           file: Dockerfile.${{ matrix.target_architecture }}
           target: ${{ matrix.target }}
           tags: ${{ env.TAG }}:${{ github.ref_name }},${{ env.TAG }}:latest
-          cache-from: type=gha,scope=${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+          cache-from: type=gha,scope=${{ matrix.target_architecture }}-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target_architecture }}-${{ matrix.target }}
           load: true
 
       - name: Test image
-        run: echo 'no tests yet'
+        if: ${{ matrix.target == 'developer' && matrix.target_architecture == 'pc686' }}
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y --no-install-recommends qemu-system-x86
+          tests/qemu-hello.sh ${{ env.TAG }}:latest
 
       - name: Push image
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
@@ -52,5 +58,5 @@ jobs:
           file: Dockerfile.${{ matrix.target_architecture }}
           target: ${{ matrix.target }}
           tags: ${{ env.TAG }}:${{ github.ref_name }},${{ env.TAG }}:latest
-          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-from: type=gha,scope=${{ matrix.target_architecture }}-${{ matrix.target }}
           push: true

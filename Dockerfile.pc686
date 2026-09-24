@@ -1,0 +1,107 @@
+FROM ubuntu:24.04 as environment
+
+# pc686 BSP for x86 VME single board computers, e.g. the VMIC/Abaco VMIVME-7750
+# (Pentium III, Tundra Universe II VME bridge, Intel 82559 NIC -> fxp driver)
+
+ENV VIRTUALENV /venv
+ENV RTEMS_MAJOR=6
+ENV RTEMS_MINOR=1
+ENV RTEMS_VERSION=${RTEMS_MAJOR}.${RTEMS_MINOR}
+ENV RTEMS_ARCH=i386
+ENV RTEMS_BSP=pc686
+ENV RTEMS_TOP=/rtems6-${RTEMS_BSP}-legacy
+ENV RTEMS_PREFIX=${RTEMS_TOP}/rtems/${RTEMS_VERSION}
+ENV PATH=${RTEMS_PREFIX}/bin:${PATH}
+
+FROM environment AS developer
+
+# build tools for x86 including busybox (for unzip and others)
+# https://docs.rtems.org/branches/master/user/start/preparation.html#host-computer
+RUN apt-get update -y && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
+    bison \
+    busybox \
+    ca-certificates \
+    curl \
+    build-essential \
+    diffutils \
+    flex \
+    git \
+    && rm -rf /var/lib/apt/lists/* && \
+    busybox --install
+
+# a python venv is requried by the RSB
+# use uv to make a python3.11 venv because the RSB does not yet support python3.12
+# (host arch aware so the image can also be built natively on arm64 hosts)
+RUN UV_TRIPLE=$(uname -m)-unknown-linux-gnu && \
+    UV_URL=https://github.com/astral-sh/uv/releases/download/0.6.0/uv-${UV_TRIPLE}.tar.gz && \
+    curl -LsSf ${UV_URL} -o uv-${UV_TRIPLE}.tar.gz && \
+    curl -LsSf ${UV_URL}.sha256 | sha256sum -c && \
+    tar -xzf uv-${UV_TRIPLE}.tar.gz -C /usr/bin --strip-components=1 && \
+    rm uv-${UV_TRIPLE}.tar.gz && \
+    uv venv --python 3.11 ${VIRTUALENV}
+
+ENV PATH=${VIRTUALENV}/bin:${PATH}
+
+# get and patch the RTEMS Source Builder
+WORKDIR ${RTEMS_TOP}
+COPY local_patch /local_patch
+RUN curl https://ftp.rtems.org/pub/rtems/releases/${RTEMS_MAJOR}/${RTEMS_VERSION}/sources/rtems-source-builder-${RTEMS_VERSION}.tar.xz \
+    | tar -xJ && \
+    mv rtems-source-builder-${RTEMS_VERSION} rsb && \
+    git apply /local_patch/${RTEMS_BSP}/rsb.patch
+
+# get the kernel and configure the BSP
+#   RTEMS_POSIX_API: required by EPICS 7 (RTEMS-posix osi layer)
+#   USE_COM1_AS_CONSOLE: VME boards are headless, the proxy drives the serial
+#     console via a terminal server (can also be set at boot with
+#     --console=/dev/com1 on the multiboot command line)
+RUN curl https://ftp.rtems.org/pub/rtems/releases/${RTEMS_MAJOR}/${RTEMS_VERSION}/sources/rtems-${RTEMS_VERSION}.tar.xz \
+    | tar -xJ && \
+    mv rtems-${RTEMS_VERSION} kernel && \
+    cd kernel && \
+    ./waf bspdefaults --rtems-bsps=${RTEMS_ARCH}/${RTEMS_BSP} > config.ini && \
+    sed -i -e "s|RTEMS_POSIX_API = False|RTEMS_POSIX_API = True|" \
+           -e "s|USE_COM1_AS_CONSOLE = False|USE_COM1_AS_CONSOLE = True|" \
+           config.ini
+
+# get legacy networking
+RUN curl https://ftp.rtems.org/pub/rtems/releases/${RTEMS_MAJOR}/${RTEMS_VERSION}/sources/rtems-net-legacy-${RTEMS_VERSION}.tar.xz \
+    | tar -xJ
+
+# build the cross compilation tool suite and strip symbols to minimize size
+WORKDIR ${RTEMS_TOP}/rsb/rtems
+RUN ../source-builder/sb-set-builder --prefix=${RTEMS_PREFIX} ${RTEMS_MAJOR}/rtems-${RTEMS_ARCH} && \
+    strip $(find ${RTEMS_PREFIX}) 2> /dev/null || true
+RUN ranlib $(find ${RTEMS_PREFIX} -name '*.a')
+
+# build the Board Support Package (samples are kept in the developer image
+# for the qemu smoke test in tests/qemu-hello.sh)
+WORKDIR ${RTEMS_TOP}/kernel
+RUN ./waf configure --prefix=${RTEMS_PREFIX} && \
+    ./waf && \
+    ./waf install
+
+# add in the legacy network stack (includes the fxp driver for Intel 8255x)
+WORKDIR ${RTEMS_TOP}/rtems-net-legacy-${RTEMS_VERSION}
+RUN ./waf configure --prefix=${RTEMS_PREFIX} --rtems-bsps=${RTEMS_ARCH}/${RTEMS_BSP} && \
+    ./waf && \
+    ./waf install
+
+from environment AS runtime_prep
+
+# To make this container target smaller we take just the BSP
+COPY --from=developer ${RTEMS_PREFIX} ${RTEMS_PREFIX}
+
+# remove files that are not required and using space
+RUN rm -r \
+    ${RTEMS_PREFIX}/share/man \
+    ${RTEMS_PREFIX}/share/info \
+    ${RTEMS_PREFIX}/i386-rtems6/lib/ldscripts
+
+from runtime_prep AS runtime
+
+# environment variables for epics-base build
+ENV RTEMS_BASE=${RTEMS_PREFIX}
+
+COPY --from=runtime_prep ${RTEMS_PREFIX} ${RTEMS_PREFIX}
