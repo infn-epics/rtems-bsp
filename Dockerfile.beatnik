@@ -60,8 +60,10 @@ RUN curl -fsSL --retry 5 --retry-all-errors https://ftp.rtems.org/pub/rtems/rele
 
 # build the cross compilation tool suite and strip symbols to minimize size
 WORKDIR ${RTEMS_TOP}/rsb/rtems
+COPY scripts/rsb-download.sh /usr/local/bin/
+RUN rsb-download.sh ${RTEMS_PREFIX} ${RTEMS_MAJOR}/rtems-${RTEMS_ARCH}
 RUN ../source-builder/sb-set-builder --prefix=${RTEMS_PREFIX} ${RTEMS_MAJOR}/rtems-${RTEMS_ARCH} && \
-    strip $(find ${RTEMS_PREFIX}) 2> /dev/null || true
+    (strip $(find ${RTEMS_PREFIX}) 2> /dev/null || true)
 RUN ranlib $(find ${RTEMS_PREFIX} -name '*.a')
 
 # build the Board Support Package with patched kernel
