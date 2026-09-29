@@ -64,6 +64,7 @@ RUN curl -fsSL --retry 5 --retry-all-errors https://ftp.rtems.org/pub/rtems/rele
 RUN curl -fsSL --retry 5 --retry-all-errors https://ftp.rtems.org/pub/rtems/releases/${RTEMS_MAJOR}/${RTEMS_VERSION}/sources/rtems-${RTEMS_VERSION}.tar.xz \
     | tar -xJ && \
     mv rtems-${RTEMS_VERSION} kernel && \
+    git apply /local_patch/${RTEMS_BSP}/kernel.patch && \
     cd kernel && \
     ./waf bspdefaults --rtems-bsps=${RTEMS_ARCH}/${RTEMS_BSP} > config.ini && \
     sed -i -e "s|RTEMS_POSIX_API = False|RTEMS_POSIX_API = True|" \

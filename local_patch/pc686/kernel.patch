@@ -1,0 +1,12 @@
+diff --git a/kernel/bsps/i386/pc386/console/fb_vga.c b/kernel/bsps/i386/pc386/console/fb_vga.c
+index 75ad56e..c9d44e3 100644
+--- a/kernel/bsps/i386/pc386/console/fb_vga.c
++++ b/kernel/bsps/i386/pc386/console/fb_vga.c
+@@ -132,6 +132,7 @@ rtems_device_driver frame_buffer_close(
+   ega_hwterm();
+   printk( "FBVGA close called.\n" );
+   return RTEMS_SUCCESSFUL;
++}
+ 
+ /*
+  * fbvga device driver READ entry point.
