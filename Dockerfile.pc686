@@ -53,17 +53,25 @@ RUN curl -fsSL --retry 5 --retry-all-errors https://ftp.rtems.org/pub/rtems/rele
 
 # get the kernel and configure the BSP
 #   RTEMS_POSIX_API: required by EPICS 7 (RTEMS-posix osi layer)
-#   USE_COM1_AS_CONSOLE: VME boards are headless, the proxy drives the serial
-#     console via a terminal server (can also be set at boot with
-#     --console=/dev/com1 on the multiboot command line)
+#   console: VGA text console by default (direct writes to video memory, no
+#     BIOS calls), boards with a serial line connected to a terminal server
+#     boot with --console=/dev/com1 on the multiboot command line
+#   USE_VBE_RM off: the VESA framebuffer init makes real mode video BIOS calls
+#     at startup, before any console output, which hang on the VMIVME-7750
+#     (--video=off does not help, the BIOS is queried before it is parsed).
+#     USE_VGA (basic VGA framebuffer driver) is then required by the build
+#   BSP_ENABLE_IDE off: diskless IOCs, and IDE probing can hang real boards
 RUN curl -fsSL --retry 5 --retry-all-errors https://ftp.rtems.org/pub/rtems/releases/${RTEMS_MAJOR}/${RTEMS_VERSION}/sources/rtems-${RTEMS_VERSION}.tar.xz \
     | tar -xJ && \
     mv rtems-${RTEMS_VERSION} kernel && \
     cd kernel && \
     ./waf bspdefaults --rtems-bsps=${RTEMS_ARCH}/${RTEMS_BSP} > config.ini && \
     sed -i -e "s|RTEMS_POSIX_API = False|RTEMS_POSIX_API = True|" \
-           -e "s|USE_COM1_AS_CONSOLE = False|USE_COM1_AS_CONSOLE = True|" \
-           config.ini
+           -e "s|USE_VBE_RM = True|USE_VBE_RM = False|" \
+           -e "s|USE_VGA = False|USE_VGA = True|" \
+           -e "s|BSP_ENABLE_IDE = True|BSP_ENABLE_IDE = False|" \
+           config.ini && \
+    grep -E "RTEMS_POSIX_API|USE_COM1_AS_CONSOLE|BSP_ENABLE_VGA|USE_VBE_RM|USE_VGA|BSP_ENABLE_IDE" config.ini
 
 # get legacy networking
 RUN curl -fsSL --retry 5 --retry-all-errors https://ftp.rtems.org/pub/rtems/releases/${RTEMS_MAJOR}/${RTEMS_VERSION}/sources/rtems-net-legacy-${RTEMS_VERSION}.tar.xz \
