@@ -75,8 +75,11 @@ RUN curl -fsSL --retry 5 --retry-all-errors https://ftp.rtems.org/pub/rtems/rele
     grep -E "RTEMS_POSIX_API|USE_COM1_AS_CONSOLE|BSP_ENABLE_VGA|USE_VBE_RM|USE_VGA|BSP_ENABLE_IDE" config.ini
 
 # get legacy networking
+#   net-legacy.patch: prefer the 82559ER (0x1209) over the ICH2 82562 (0x2449)
+#   in the fxp driver, the VMIVME-7750 has both and the first one found wins
 RUN curl -fsSL --retry 5 --retry-all-errors https://ftp.rtems.org/pub/rtems/releases/${RTEMS_MAJOR}/${RTEMS_VERSION}/sources/rtems-net-legacy-${RTEMS_VERSION}.tar.xz \
-    | tar -xJ
+    | tar -xJ && \
+    git apply /local_patch/${RTEMS_BSP}/net-legacy.patch
 
 # build the cross compilation tool suite and strip symbols to minimize size
 #   only strip the host executables: unlike powerpc, the host strip understands

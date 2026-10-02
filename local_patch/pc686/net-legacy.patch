@@ -1,0 +1,25 @@
+diff --git a/rtems-net-legacy-6.1/bsps/shared/net/if_fxp.c b/rtems-net-legacy-6.1/bsps/shared/net/if_fxp.c
+index 2bf9907..1d1786b 100644
+--- a/rtems-net-legacy-6.1/bsps/shared/net/if_fxp.c
++++ b/rtems-net-legacy-6.1/bsps/shared/net/if_fxp.c
+@@ -199,7 +199,11 @@ struct fxp_ident {
+  */
+ static struct fxp_ident fxp_ident_table[] = {
+     { 0x1229,		"Intel Pro 10/100B/100+ Ethernet", 0 },
+-    { 0x2449,		"Intel Pro/100 Ethernet", UNTESTED },
++    /*
++     * 0x2449 (82562 in the ICH2 south bridge) moved to the end of the table:
++     * the first entry found wins, and on boards like the VMIVME-7750 the
++     * cabled port is the 82559ER (0x1209), the ICH2 one is the second port
++     */
+     { 0x1209,		"Intel Embedded 10/100 Ethernet", 0 },
+     { 0x1029,		"Intel Pro/100 Ethernet", UNTESTED },
+     { 0x1030,		"Intel Pro/100 Ethernet", 0 },
+@@ -212,6 +216,7 @@ static struct fxp_ident fxp_ident_table[] = {
+     { 0x1037,		"Intel Pro/100 Ethernet", UNTESTED },
+     { 0x1038,		"Intel Pro/100 Ethernet", UNTESTED },
+     { 0x103B,		"Intel Pro/100 Ethernet (82801BD PRO/100 VM (LOM))", 0 },
++    { 0x2449,		"Intel Pro/100 Ethernet", UNTESTED },
+     { 0,		NULL, 0 }
+ };
+ 
