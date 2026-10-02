@@ -10,3 +10,22 @@ index 75ad56e..c9d44e3 100644
  
  /*
   * fbvga device driver READ entry point.
+diff --git a/kernel/bsps/shared/dev/pci/pci_bus_count.c b/kernel/bsps/shared/dev/pci/pci_bus_count.c
+index 104bf34..ae6e842 100644
+--- a/kernel/bsps/shared/dev/pci/pci_bus_count.c
++++ b/kernel/bsps/shared/dev/pci/pci_bus_count.c
+@@ -62,6 +62,14 @@ unsigned char pci_bus_count(void)
+   } else if ( pci_number_of_buses == 0xff ) {
+     printk("pci_bus_count() found 0xff busses, assuming 1\n");
+     pci_number_of_buses = 1;
++  } else {
++    /*
++     * The loop found the highest subordinate bus number, but callers use
++     * the result as a count (bus < pci_bus_count()). Without this, devices
++     * on the highest bus are never found, e.g. everything behind the ICH2
++     * PCI bridge (bus 1) on the VMIVME-7750: NICs and the Universe VME bridge
++     */
++    pci_number_of_buses++;
+   }
+ 
+   return pci_number_of_buses;
