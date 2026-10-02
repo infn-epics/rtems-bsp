@@ -10,6 +10,302 @@ index 75ad56e..c9d44e3 100644
  
  /*
   * fbvga device driver READ entry point.
+diff --git a/kernel/bsps/i386/pc386/include/bsp/VMEConfig.h b/kernel/bsps/i386/pc386/include/bsp/VMEConfig.h
+new file mode 100644
+index 0000000..1a0ccb3
+--- /dev/null
++++ b/kernel/bsps/i386/pc386/include/bsp/VMEConfig.h
+@@ -0,0 +1,71 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++
++/*
++ * VME configuration for pc386 family boards with a Tundra Universe II VME
++ * bridge, e.g. the VMIC/Abaco VMIVME-7750.
++ *
++ * The shared Universe driver (bsps/powerpc/shared/vme) is used unchanged.
++ * The outbound windows are in PCI memory space above the top of RAM: on the
++ * VMIVME-7750 the ICH2 hub-to-PCI bridge decodes subtractively, so these
++ * addresses reach the Universe on the secondary PCI bus.
++ *
++ * Default windows (more can be set up at run time, e.g. from an EPICS st.cmd,
++ * with BSP_VMEOutboundPortCfg on the free ports 3..6):
++ *   port 0  A32 (AM 0x0d)  VME 0x20000000..0x2dffffff  PCI 0x90000000
++ *   port 1  A24 (AM 0x3d)  VME 0x000000..0xfeffff      PCI 0x9f000000
++ *   port 2  A16 (AM 0x2d)  VME 0x0000..0xffff          PCI 0x9fff0000
++ *   port 7  CR/CSR (0x2f)  VME 0x000000..0xffffff      PCI 0x9e000000
++ */
++
++#ifndef RTEMS_BSP_VME_CONFIG_H
++#define RTEMS_BSP_VME_CONFIG_H
++
++#include <bsp.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define _VME_DRIVER_UNIVERSE
++
++/* CPU and PCI memory addresses are the same on PCs */
++#ifndef PCI_MEM_BASE
++#define PCI_MEM_BASE                    0
++#endif
++#ifndef PCI_DRAM_OFFSET
++#define PCI_DRAM_OFFSET                 0
++#endif
++
++#define _VME_A32_WIN0_ON_PCI            0x90000000
++#define _VME_A32_WIN0_ON_VME            0x20000000
++#define _VME_A32_WIN0_SIZE              0x0e000000
++#define _VME_CSR_ON_PCI                 0x9e000000
++#define _VME_A24_ON_PCI                 0x9f000000
++#define _VME_A16_ON_PCI                 0x9fff0000
++
++int BSP_VMEInit(void);
++int BSP_VMEIrqMgrInstall(void);
++
++/*
++ * Set up the VMIC board registers (if present) and the Universe windows and
++ * interrupts. Called by the application (EPICS calls it at startup). Boot
++ * with --novme on the command line to skip it.
++ */
++void BSP_vme_config(void);
++
++/*
++ * Clear and report VME bus errors logged by the Universe since the last
++ * call; nonzero means an error occurred. Used for bus error safe probing
++ * (on PCs a VME bus error does not raise an exception, a read returns all
++ * ones and the error is only logged).
++ */
++unsigned long _BSP_clear_hostbridge_errors(int enableMCE, int quiet);
++
++/* print the Universe and VMIC error and status registers (diagnostics) */
++void BSP_VMEErrorsShow(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* RTEMS_BSP_VME_CONFIG_H */
+diff --git a/kernel/bsps/i386/pc386/vme/vmeconfig.c b/kernel/bsps/i386/pc386/vme/vmeconfig.c
+new file mode 100644
+index 0000000..f786a09
+--- /dev/null
++++ b/kernel/bsps/i386/pc386/vme/vmeconfig.c
+@@ -0,0 +1,213 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++
++/*
++ * VME configuration for pc386 family boards with a Tundra Universe II,
++ * e.g. the VMIC/Abaco VMIVME-7750. See <bsp/VMEConfig.h>.
++ */
++
++#include <bsp.h>
++#include <bsp/VME.h>
++#include <bsp/VMEConfig.h>
++#include <bsp/vmeUniverse.h>
++#include <rtems/bspIo.h>
++#include <rtems/pci.h>
++
++#include <inttypes.h>
++#include <stdint.h>
++
++/*
++ * VMIC VMIVME-7xxx board control FPGA (PCI 114a:0004), register block in
++ * BAR0. The COMM register enables the VMEbus interface and the hardware byte
++ * swapping between the little endian PCI side and the big endian VMEbus.
++ * Bits and access width as in the VMIC Linux driver (vmic_init_fpga), except
++ * BERRIM: that enables a PCI interrupt on VME bus errors, which the Linux
++ * driver services; here bus errors are polled (_BSP_clear_hostbridge_errors)
++ * and an unserviced level triggered interrupt would hang the CPU.
++ */
++#define VMIC_VENDOR_ID              0x114a
++#define VMIC_DEVICE_FPGA            0x0004
++
++#define VMIVMEP_COMM                0x00
++#define VMIVMEP_B_ADDRESS           0x0c
++
++#define VMIVMEP_COMM_VME_EN         0x0800  /* VMEbus interface enable */
++#define VMIVMEP_COMM_BERRST         0x0080  /* bus error latched, write 1 clears */
++#define VMIVMEP_COMM_BERRIM         0x0040  /* bus error interrupt enable */
++#define VMIVMEP_COMM_BTOV           0x0030  /* bus timeout value, 0: 16 us */
++#define VMIVMEP_COMM_ABLE           0x0004  /* address based little endian */
++#define VMIVMEP_COMM_SEC            0x0002  /* slave endian conversion */
++#define VMIVMEP_COMM_MEC            0x0001  /* master endian conversion */
++
++#define VMIC_COMM(r)  (*(volatile uint32_t *) ((r) + VMIVMEP_COMM))
++
++static volatile uint8_t *vmic_regs;
++static int universe_ok;           /* Universe found and configured */
++
++static void vmic_init(void)
++{
++  int bus, dev, fun;
++  uint32_t bar;
++  uint16_t cmd;
++  uint32_t comm;
++
++  if (pci_find_device(VMIC_VENDOR_ID, VMIC_DEVICE_FPGA, 0,
++                      &bus, &dev, &fun) != PCIB_ERR_SUCCESS) {
++    printk("VME: no VMIC board control FPGA, not a VMIC board\n");
++    return;
++  }
++
++  pci_read_config_dword(bus, dev, fun, PCI_BASE_ADDRESS_0, &bar);
++  if (bar & PCI_BASE_ADDRESS_SPACE_IO) {
++    printk("VME: unexpected I/O BAR0 0x%08" PRIx32 " in VMIC FPGA\n", bar);
++    return;
++  }
++  pci_read_config_word(bus, dev, fun, PCI_COMMAND, &cmd);
++  pci_write_config_word(bus, dev, fun, PCI_COMMAND, cmd | PCI_COMMAND_MEMORY);
++
++  vmic_regs = (volatile uint8_t *) (uintptr_t) (bar & PCI_BASE_ADDRESS_MEM_MASK);
++
++  comm = VMIC_COMM(vmic_regs);
++  VMIC_COMM(vmic_regs) = comm | VMIVMEP_COMM_BERRST;  /* clear latched error */
++  VMIC_COMM(vmic_regs) = (comm & VMIVMEP_COMM_BTOV) | VMIVMEP_COMM_VME_EN |
++                         VMIVMEP_COMM_ABLE | VMIVMEP_COMM_SEC |
++                         VMIVMEP_COMM_MEC;
++
++  printk("VME: VMIC FPGA at %d:%d.%d regs 0x%08" PRIxPTR " COMM 0x%04" PRIx32
++         " (was 0x%04" PRIx32 ")\n", bus, dev, fun, (uintptr_t) vmic_regs,
++         VMIC_COMM(vmic_regs), (uint32_t) comm);
++}
++
++unsigned long _BSP_clear_hostbridge_errors(int enableMCE, int quiet)
++{
++  unsigned long rval = 0;
++  unsigned long amerr;
++  unsigned long csr;
++
++  (void) enableMCE;
++
++  if (!universe_ok)
++    return 0;
++
++  /* VME bus errors seen by the Universe as master */
++  amerr = vmeUniverseReadReg(UNIV_REGOFF_V_AMERR);
++  if (amerr & UNIV_V_AMERR_V_STAT) {
++    if (!quiet) {
++      printk("VME bus error at 0x%08lx, AM 0x%02lx%s\n",
++             vmeUniverseReadReg(UNIV_REGOFF_VAERR),
++             UNIV_V_AMERR_AMERR(amerr),
++             (amerr & UNIV_V_AMERR_M_ERR) ? " (multiple errors)" : "");
++    }
++    vmeUniverseWriteReg(UNIV_V_AMERR_V_STAT, UNIV_REGOFF_V_AMERR);
++    rval = 1;
++  }
++
++  /* the PCI cycle is terminated with a target abort */
++  csr = vmeUniverseReadReg(UNIV_REGOFF_PCI_CSR);
++  if (csr & (UNIV_PCI_CSR_S_TA | UNIV_PCI_CSR_R_TA | UNIV_PCI_CSR_R_MA)) {
++    vmeUniverseWriteReg(csr, UNIV_REGOFF_PCI_CSR);  /* write 1 to clear */
++    rval = 1;
++  }
++
++  /* bus errors latched by the VMIC FPGA */
++  if (vmic_regs != NULL) {
++    uint32_t comm = VMIC_COMM(vmic_regs);
++
++    if (comm & VMIVMEP_COMM_BERRST) {
++      if (!quiet) {
++        printk("VME bus error (VMIC) at 0x%08" PRIx32 "\n",
++               *(volatile uint32_t *) (vmic_regs + VMIVMEP_B_ADDRESS));
++      }
++      VMIC_COMM(vmic_regs) = comm;          /* BERRST set: write 1 clears */
++      rval = 1;
++    }
++  }
++
++  return rval;
++}
++
++void BSP_VMEErrorsShow(void)
++{
++  if (!universe_ok) {
++    printk("VME: no Universe configured\n");
++    return;
++  }
++  printk("Universe PCI_CSR  0x%08lx\n", vmeUniverseReadReg(UNIV_REGOFF_PCI_CSR));
++  printk("Universe L_CMDERR 0x%08lx LAERR 0x%08lx (PCI side error log)\n",
++         vmeUniverseReadReg(UNIV_REGOFF_L_CMDERR),
++         vmeUniverseReadReg(UNIV_REGOFF_LAERR));
++  printk("Universe V_AMERR  0x%08lx VAERR 0x%08lx (VME side error log)\n",
++         vmeUniverseReadReg(UNIV_REGOFF_V_AMERR),
++         vmeUniverseReadReg(UNIV_REGOFF_VAERR));
++  printk("Universe LINT_STAT 0x%08lx MISC_CTL 0x%08lx MAST_CTL 0x%08lx\n",
++         vmeUniverseReadReg(UNIV_REGOFF_LINT_STAT),
++         vmeUniverseReadReg(UNIV_REGOFF_MISC_CTL),
++         vmeUniverseReadReg(UNIV_REGOFF_MAST_CTL));
++  if (vmic_regs != NULL)
++    printk("VMIC COMM 0x%08" PRIx32 " B_ADDRESS 0x%08" PRIx32 "\n",
++           VMIC_COMM(vmic_regs),
++           *(volatile uint32_t *) (vmic_regs + VMIVMEP_B_ADDRESS));
++}
++
++void BSP_vme_config(void)
++{
++  static int done;
++
++  if (done)
++    return;
++  done = 1;
++
++  if (bsp_cmdline_arg("--novme") != NULL) {
++    printk("VME: disabled by --novme\n");
++    return;
++  }
++
++  vmic_init();
++
++  if (BSP_VMEInit() != 0) {
++    printk("VME: no Universe VME bridge found, skipping VME setup\n");
++    return;
++  }
++  universe_ok = 1;
++
++  /*
++   * Without a VMEbus timeout an access to an empty address never ends and
++   * the CPU hangs on the PCI read. On MVME boards the firmware sets it, here
++   * nobody does: use the VMIC Linux driver setting (MISC_CTL 0x35060000:
++   * 64 us bus timeout, priority arbitration, 16 us arbitration timeout),
++   * keeping the board's SYSCON setting.
++   */
++  {
++    unsigned long misc = vmeUniverseReadReg(UNIV_REGOFF_MISC_CTL);
++    unsigned long fixed = misc;
++
++    if ((misc & UNIV_MISC_CTL_VBTO(7)) == 0)
++      fixed |= UNIV_MISC_CTL_VBTO(3);
++    if ((misc & UNIV_MISC_CTL_SYSCON) && (misc & UNIV_MISC_CTL_VARBTO(3)) == 0)
++      fixed |= UNIV_MISC_CTL_VARB | UNIV_MISC_CTL_VARBTO(1);
++    fixed &= ~(UNIV_MISC_CTL_SW_LRST | UNIV_MISC_CTL_SW_SYSRST);
++    if (fixed != misc)
++      vmeUniverseWriteReg(fixed, UNIV_REGOFF_MISC_CTL);
++    printk("VME: Universe MISC_CTL 0x%08lx -> 0x%08lx (%s)\n", misc,
++           vmeUniverseReadReg(UNIV_REGOFF_MISC_CTL),
++           (misc & UNIV_MISC_CTL_SYSCON) ? "system controller" :
++           "not system controller");
++  }
++
++  BSP_VMEOutboundPortCfg(0, VME_AM_EXT_SUP_DATA, _VME_A32_WIN0_ON_VME,
++                         _VME_A32_WIN0_ON_PCI, _VME_A32_WIN0_SIZE);
++  BSP_VMEOutboundPortCfg(1, VME_AM_STD_SUP_DATA, 0x00000000,
++                         _VME_A24_ON_PCI, 0x00ff0000);
++  BSP_VMEOutboundPortCfg(2, VME_AM_SUP_SHORT_IO, 0x00000000,
++                         _VME_A16_ON_PCI, 0x00010000);
++  BSP_VMEOutboundPortCfg(7, VME_AM_CSR, 0x00000000,
++                         _VME_CSR_ON_PCI, 0x01000000);
++
++  BSP_VMEOutboundPortsShow(NULL);
++  BSP_VMEInboundPortsShow(NULL);
++
++  /* discard errors from before the configuration */
++  _BSP_clear_hostbridge_errors(0, 1);
++
++  if (BSP_VMEIrqMgrInstall() != 0)
++    printk("VME: can't install the Universe interrupt manager\n");
++}
 diff --git a/kernel/bsps/shared/dev/pci/pci_bus_count.c b/kernel/bsps/shared/dev/pci/pci_bus_count.c
 index 104bf34..ae6e842 100644
 --- a/kernel/bsps/shared/dev/pci/pci_bus_count.c
@@ -29,3 +325,49 @@ index 104bf34..ae6e842 100644
    }
  
    return pci_number_of_buses;
+diff --git a/kernel/spec/build/bsps/i386/pc386/bsppc686.yml b/kernel/spec/build/bsps/i386/pc386/bsppc686.yml
+index 5090683..89528e9 100644
+--- a/kernel/spec/build/bsps/i386/pc386/bsppc686.yml
++++ b/kernel/spec/build/bsps/i386/pc386/bsppc686.yml
+@@ -15,5 +15,7 @@ links:
+   uid: ../../opto2
+ - role: build-dependency
+   uid: grp
++- role: build-dependency
++  uid: objvme
+ source: []
+ type: build
+diff --git a/kernel/spec/build/bsps/i386/pc386/objvme.yml b/kernel/spec/build/bsps/i386/pc386/objvme.yml
+new file mode 100644
+index 0000000..e57c3fe
+--- /dev/null
++++ b/kernel/spec/build/bsps/i386/pc386/objvme.yml
+@@ -0,0 +1,28 @@
++SPDX-License-Identifier: CC-BY-SA-4.0 OR BSD-2-Clause
++build-type: objects
++cflags: []
++copyrights:
++- Copyright (C) 2026 INFN
++cppflags: []
++cxxflags: []
++enabled-by: true
++includes:
++- bsps/powerpc/include
++- bsps/powerpc/shared/vme
++install:
++- destination: ${BSP_INCLUDEDIR}/bsp
++  source:
++  - bsps/i386/pc386/include/bsp/VMEConfig.h
++  - bsps/powerpc/include/bsp/VME.h
++  - bsps/powerpc/include/bsp/VMEDMA.h
++  - bsps/powerpc/include/bsp/bspVmeDmaList.h
++  - bsps/powerpc/include/bsp/vmeUniverse.h
++  - bsps/powerpc/include/bsp/vmeUniverseDMA.h
++  - bsps/powerpc/include/bsp/vme_am_defs.h
++links: []
++source:
++- bsps/i386/pc386/vme/vmeconfig.c
++- bsps/powerpc/shared/vme/bspVmeDmaList.c
++- bsps/powerpc/shared/vme/vmeUniverse.c
++- bsps/powerpc/shared/vme/vme_universe.c
++type: build
